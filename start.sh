@@ -8,14 +8,15 @@ echo "⚡ CYBER CAFÉ AUTOMATED MANAGEMENT SYSTEM INITIALIZER 🚀"
 echo "=========================================================="
 
 # 1. Start Postgresql if it is not online
-echo "1. Ensuring PostgreSQL Database Cluster is Online..."
-if pg_lsclusters | grep -q "17" && pg_lsclusters | grep "17" | grep -q "online"; then
-  echo "✔ PostgreSQL is already online."
+echo "1. Checking PostgreSQL connection..."
+
+if command -v psql >/dev/null 2>&1; then
+  echo "✔ PostgreSQL client is available."
 else
-  echo "⚙ Starting PostgreSQL cluster..."
-  sudo pg_ctlcluster 17 main start
-  echo "✔ PostgreSQL successfully started."
+  echo "⚠ PostgreSQL not installed locally. Using external DB or skipping start."
 fi
+
+echo "✔ Database assumed running (external or service-managed)."
 
 # 2. Start Express Backend
 echo "2. Starting Express REST API Backend..."

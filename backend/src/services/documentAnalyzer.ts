@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import pdfParse from 'pdf-parse';
+import { DocumentPageCounter, FilePageBreakdown } from './documentPageCounter';
 
 export interface FileAnalysisDetail {
   originalName: string;
@@ -91,89 +91,46 @@ function basicMalwareScan(filePath: string, originalName: string): { isSafe: boo
 /**
  * Detect PDF page size based on /MediaBox coordinates
  */
-function detectPdfPageSize(rawContent: string): string {
-  // A4 point size is roughly 595 x 842
-  // A3 point size is roughly 842 x 1191
-  // We search for /MediaBox [ x y width height ]
-  const mediaBoxRegex = /\/MediaBox\s*\[\s*(-?\d+(\.\d+)?)\s+(-?\d+(\.\d+)?)\s+(\d+(\.\d+)?)\s+(\d+(\.\d+)?)\s*\]/g;
-  let match;
-  let maxW = 0;
-  let maxH = 0;
-
-  while ((match = mediaBoxRegex.exec(rawContent)) !== null) {
-    const width = parseFloat(match[5]);
-    const height = parseFloat(match[7]);
-    if (width > maxW) maxW = width;
-    if (height > maxH) maxH = height;
-  }
-
-  if (maxW > 800 || maxH > 1100) {
-    return 'A3';
-  }
-  return 'A4'; // default to A4 standard point size
-}
-
-/**
- * PDF parser for page counts, sizes, and B/W vs Color pages (Heuristic MVP)
- */
-async function analyzePdf(filePath: string): Promise<{ pages: number; colorPages: number; bwPages: number; pageSize: string }> {
+function detectPdfPageSize(filePath: string): string {
   try {
     const dataBuffer = fs.readFileSync(filePath);
     const rawContent = dataBuffer.toString('binary');
-    const pageSize = detectPdfPageSize(rawContent);
+    const mediaBoxRegex = /\/MediaBox\s*\[\s*(-?\d+(\.\d+)?)\s+(-?\d+(\.\d+)?)\s+(\d+(\.\d+)?)\s+(\d+(\.\d+)?)\s*\]/g;
+    let match;
+    let maxW = 0;
+    let maxH = 0;
 
-    let pdfData;
-    try {
-      pdfData = await pdfParse(dataBuffer);
-    } catch (e) {
-      const pageMatches = rawContent.match(/\/Type\s*\/Page\b/g);
-      const pagesCount = pageMatches ? pageMatches.length : 1;
-      return { pages: pagesCount, colorPages: 0, bwPages: pagesCount, pageSize };
+    while ((match = mediaBoxRegex.exec(rawContent)) !== null) {
+      const width = parseFloat(match[5]);
+      const height = parseFloat(match[7]);
+      if (width > maxW) maxW = width;
+      if (height > maxH) maxH = height;
     }
 
-    const pages = pdfData.numpages || 1;
-
-    // MVP Color vs B/W page detection
-    // RGB references or drawing/stroke commands signify color content.
-    const rgbOccurrences = (rawContent.match(/\/DeviceRGB/g) || []).length;
-    const colorOperators = (rawContent.match(/\d+(\.\d+)?\s+\d+(\.\d+)?\s+\d+(\.\d+)?\s+[rR][gG]/g) || []).length;
-    
-    let colorPages = 0;
-    if (rgbOccurrences > 0 || colorOperators > 5) {
-      colorPages = Math.min(pages, Math.max(1, Math.round(rgbOccurrences / 3)));
+    if (maxW > 800 || maxH > 1100) {
+      return 'A3';
     }
-    const bwPages = pages - colorPages;
-
-    return {
-      pages,
-      colorPages,
-      bwPages,
-      pageSize,
-    };
-  } catch (error) {
-    console.error('Error in analyzePdf:', error);
-    return { pages: 1, colorPages: 0, bwPages: 1, pageSize: 'A4' };
+  } catch (e) {
+    console.error('Page size detection error:', e);
   }
+  return 'A4';
 }
 
 /**
- * Main analysis function supporting single/multi-file arrays
+ * Main analysis function supporting single/multi-file arrays (Integrated with DocumentPageCounter)
  */
 export async function analyzeUploadedDocuments(
   uploadedFiles: Express.Multer.File[]
 ): Promise<DocumentAnalysisResult> {
   const filesDetails: FileAnalysisDetail[] = [];
-  let totalPages = 0;
-  let totalColorPages = 0;
-  let totalBwPages = 0;
-  let resolvedPageSize = 'A4';
   let overallSafe = true;
-  let malwareLog = 'All files passed.';
+  let malwareLog = 'All files passed magic bytes and macro virus scanning.';
 
+  // 1. Perform Security Scans & Magic-bytes validation first
   for (const file of uploadedFiles) {
     const ext = path.extname(file.originalname).toLowerCase();
     
-    // 1. Run malware scan
+    // Antivirus checks
     const malwareScan = basicMalwareScan(file.path, file.originalname);
     if (!malwareScan.isSafe) {
       overallSafe = false;
@@ -181,47 +138,84 @@ export async function analyzeUploadedDocuments(
       break;
     }
 
-    // 2. Magic byte check
+    // Binary headers inspection
     const magicCheck = checkMagicBytes(file.path, ext);
     if (!magicCheck.isSafe) {
       overallSafe = false;
-      malwareLog = 'File verification failed. Blocked unknown magic headers.';
+      malwareLog = `Security alert: magic hex bytes mismatch for "${file.originalname}". Re-verify extension origin.`;
       break;
     }
+  }
 
-    let pages = 1;
+  // If any threat was identified, stop proceeding and report blocked state
+  if (!overallSafe) {
+    return {
+      totalPages: 0,
+      totalColorPages: 0,
+      totalBwPages: 0,
+      pageSize: 'A4',
+      isSafe: false,
+      malwareCheckLog: malwareLog,
+      files: [],
+    };
+  }
+
+  // 2. Delegate Page Counting logic to the new accurate Multi-Format Engine
+  const countingResult = await DocumentPageCounter.calculateTotalPages(uploadedFiles);
+
+  let totalPages = countingResult.totalPages;
+  let totalColorPages = 0;
+  let totalBwPages = 0;
+  let resolvedPageSize = 'A4';
+
+  // 3. Complete detail metadata and color-split estimation arrays
+  for (const file of uploadedFiles) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    
+    // Find calculated page count from the Unified Page Counter breakdown
+    const matchingBreakdown = countingResult.breakdown.find(b => b.file === file.originalname);
+    const pages = matchingBreakdown ? matchingBreakdown.pages : 1;
+
     let colorPages = 0;
-    let bwPages = 1;
+    let bwPages = pages;
     let pageSize = 'A4';
 
     if (ext === '.pdf') {
-      const pdfAnalysis = await analyzePdf(file.path);
-      pages = pdfAnalysis.pages;
-      colorPages = pdfAnalysis.colorPages;
-      bwPages = pdfAnalysis.bwPages;
-      pageSize = pdfAnalysis.pageSize;
+      pageSize = detectPdfPageSize(file.path);
       if (pageSize === 'A3') resolvedPageSize = 'A3';
+      
+      // Basic PDF Color heuristic
+      try {
+        const dataBuffer = fs.readFileSync(file.path);
+        const rawContent = dataBuffer.toString('binary');
+        const rgbOccurrences = (rawContent.match(/\/DeviceRGB/g) || []).length;
+        if (rgbOccurrences > 0) {
+          colorPages = Math.min(pages, Math.max(1, Math.round(rgbOccurrences / 3)));
+        }
+      } catch (e) {
+        console.error('PDF color heuristic read error:', e);
+      }
+      bwPages = pages - colorPages;
     } else if (ext === '.docx') {
-      pages = 1;
       colorPages = 0;
-      bwPages = 1;
-      pageSize = 'A4';
+      bwPages = pages;
     } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
-      pages = 1;
-      colorPages = 1; // image is counted as color page by default
+      colorPages = 1; // single image page counted as color page
       bwPages = 0;
-      pageSize = 'A4';
     }
 
-    totalPages += pages;
     totalColorPages += colorPages;
     totalBwPages += bwPages;
+
+    const fileType = ext === '.pdf' ? 'application/pdf' :
+                     ext === '.docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' :
+                     ext === '.png' ? 'image/png' : 'image/jpeg';
 
     filesDetails.push({
       originalName: file.originalname,
       filePath: file.filename,
       size: file.size,
-      mimetype: magicCheck.fileType,
+      mimetype: fileType,
       pages,
       colorPages,
       bwPages,
@@ -235,7 +229,7 @@ export async function analyzeUploadedDocuments(
     totalColorPages,
     totalBwPages,
     pageSize: resolvedPageSize,
-    isSafe: overallSafe,
+    isSafe: true,
     malwareCheckLog: malwareLog,
     files: filesDetails,
   };
