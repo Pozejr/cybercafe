@@ -18,7 +18,7 @@ const router = Router();
 router.post('/auth/login', loginStaff);
 
 // Document Upload & Analysis
-router.post('/upload', upload.single('file'), uploadDocument);
+router.post('/upload', upload.any(), uploadDocument);
 
 // Order Placement & Tracking
 router.post('/order/create', createOrder);

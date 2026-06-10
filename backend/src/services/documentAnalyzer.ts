@@ -2,18 +2,30 @@ import fs from 'fs';
 import path from 'path';
 import pdfParse from 'pdf-parse';
 
-interface DocumentAnalysisResult {
+export interface FileAnalysisDetail {
+  originalName: string;
+  filePath: string;
+  size: number;
+  mimetype: string;
   pages: number;
   colorPages: number;
   bwPages: number;
-  fileSize: number;
-  fileType: string;
+  pageSize: string; // A4, A3, etc.
+  isSafe: boolean;
+}
+
+export interface DocumentAnalysisResult {
+  totalPages: number;
+  totalColorPages: number;
+  totalBwPages: number;
+  pageSize: string;
   isSafe: boolean;
   malwareCheckLog: string;
+  files: FileAnalysisDetail[];
 }
 
 /**
- * Validates file magic bytes (signatures) to prevent executable spoofing
+ * Validates file magic bytes (signatures)
  */
 function checkMagicBytes(filePath: string, extension: string): { isSafe: boolean; fileType: string } {
   const buffer = Buffer.alloc(8);
@@ -23,212 +35,208 @@ function checkMagicBytes(filePath: string, extension: string): { isSafe: boolean
 
   const hex = buffer.toString('hex').toUpperCase();
 
-  // PDF: %PDF (25504446)
-  if (extension === '.pdf') {
-    if (hex.startsWith('25504446')) {
-      return { isSafe: true, fileType: 'application/pdf' };
-    }
-    return { isSafe: false, fileType: 'unknown' };
+  if (extension === '.pdf' && hex.startsWith('25504446')) {
+    return { isSafe: true, fileType: 'application/pdf' };
   }
-
-  // PNG: \x89PNG (89504E47)
-  if (extension === '.png') {
-    if (hex.startsWith('89504E47')) {
-      return { isSafe: true, fileType: 'image/png' };
-    }
-    return { isSafe: false, fileType: 'unknown' };
+  if (extension === '.png' && hex.startsWith('89504E47')) {
+    return { isSafe: true, fileType: 'image/png' };
   }
-
-  // JPEG: \xFF\xD8 (FFD8)
-  if (extension === '.jpg' || extension === '.jpeg') {
-    if (hex.startsWith('FFD8')) {
-      return { isSafe: true, fileType: 'image/jpeg' };
-    }
-    return { isSafe: false, fileType: 'unknown' };
+  if ((extension === '.jpg' || extension === '.jpeg') && hex.startsWith('FFD8')) {
+    return { isSafe: true, fileType: 'image/jpeg' };
   }
-
-  // DOCX / ZIP: PK.. (504B0304 or 504B0506 or 504B0708)
-  if (extension === '.docx') {
-    if (hex.startsWith('504B0304')) {
-      return { isSafe: true, fileType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
-    }
-    return { isSafe: false, fileType: 'unknown' };
+  if (extension === '.docx' && hex.startsWith('504B0304')) {
+    return { isSafe: true, fileType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
   }
 
   return { isSafe: false, fileType: 'unknown' };
 }
 
 /**
- * Basic malware scan (scans for shellcode signatures, suspicious scripts, executable extensions, and double extensions)
+ * Basic malware check
  */
 function basicMalwareScan(filePath: string, originalName: string): { isSafe: boolean; log: string } {
   const ext = path.extname(originalName).toLowerCase();
   
-  // 1. Double extension check (e.g., document.pdf.exe)
   if (originalName.split('.').length > 2) {
     const dangerousExts = ['.exe', '.bat', '.sh', '.js', '.vbs', '.scr', '.pif'];
     for (const dExt of dangerousExts) {
       if (originalName.toLowerCase().endsWith(dExt)) {
-        return { isSafe: false, log: `Malware Check Failed: Double extension containing dangerous suffix '${dExt}'` };
+        return { isSafe: false, log: `Malware Blocked: Double extension containing dangerous suffix '${dExt}'` };
       }
     }
   }
 
-  // 2. Dangerous file extensions
   const forbiddenExtensions = ['.exe', '.dll', '.bat', '.cmd', '.sh', '.msi', '.vbs', '.js', '.scr'];
   if (forbiddenExtensions.includes(ext)) {
-    return { isSafe: false, log: `Malware Check Failed: Blocked executable/script extension: ${ext}` };
+    return { isSafe: false, log: `Malware Blocked: Executable/script forbidden extension: ${ext}` };
   }
 
-  // 3. Content matching for common shellcode/malicious strings (basic check for non-binary formats)
   try {
     const fileStats = fs.statSync(filePath);
-    if (fileStats.size > 10 * 1024 * 1024) {
-      // Don't scan huge files line-by-line in memory for basic MVP, assume safe if magic bytes match
-      return { isSafe: true, log: 'Malware Check: File size exceeds threshold, passed signature scan (magic bytes verified).' };
-    }
+    if (fileStats.size <= 10 * 1024 * 1024) {
+      const content = fs.readFileSync(filePath);
+      const contentStr = content.toString('utf-8', 0, Math.min(content.length, 50000));
 
-    const content = fs.readFileSync(filePath);
-    const contentStr = content.toString('utf-8', 0, Math.min(content.length, 50000)); // scan first 50KB
-
-    // Check for high risk scripts in documents (e.g. malicious macros or executable code)
-    if (ext === '.pdf') {
-      if (contentStr.includes('/JS') || contentStr.includes('/JavaScript') || contentStr.includes('/AA') || contentStr.includes('/Launch')) {
-        return { isSafe: false, log: 'Malware Check Failed: Suspicious JavaScript or Launch actions detected inside PDF' };
+      if (ext === '.pdf' && (contentStr.includes('/JS') || contentStr.includes('/JavaScript') || contentStr.includes('/AA') || contentStr.includes('/Launch'))) {
+        return { isSafe: false, log: 'Malware Blocked: JavaScript macro code detected inside PDF' };
       }
     }
   } catch (error) {
-    return { isSafe: false, log: `Malware Check Error: Failed to scan file contents: ${(error as Error).message}` };
+    return { isSafe: false, log: `Malware Scan Error: ${(error as Error).message}` };
   }
 
-  return { isSafe: true, log: 'Malware Check Passed: File extension, signature, and basic macro-scan verified safe.' };
+  return { isSafe: true, log: 'Passes security heuristics.' };
 }
 
 /**
- * PDF parser for page counts and B/W vs Color page estimation
+ * Detect PDF page size based on /MediaBox coordinates
  */
-async function analyzePdf(filePath: string): Promise<{ pages: number; colorPages: number; bwPages: number }> {
+function detectPdfPageSize(rawContent: string): string {
+  // A4 point size is roughly 595 x 842
+  // A3 point size is roughly 842 x 1191
+  // We search for /MediaBox [ x y width height ]
+  const mediaBoxRegex = /\/MediaBox\s*\[\s*(-?\d+(\.\d+)?)\s+(-?\d+(\.\d+)?)\s+(\d+(\.\d+)?)\s+(\d+(\.\d+)?)\s*\]/g;
+  let match;
+  let maxW = 0;
+  let maxH = 0;
+
+  while ((match = mediaBoxRegex.exec(rawContent)) !== null) {
+    const width = parseFloat(match[5]);
+    const height = parseFloat(match[7]);
+    if (width > maxW) maxW = width;
+    if (height > maxH) maxH = height;
+  }
+
+  if (maxW > 800 || maxH > 1100) {
+    return 'A3';
+  }
+  return 'A4'; // default to A4 standard point size
+}
+
+/**
+ * PDF parser for page counts, sizes, and B/W vs Color pages (Heuristic MVP)
+ */
+async function analyzePdf(filePath: string): Promise<{ pages: number; colorPages: number; bwPages: number; pageSize: string }> {
   try {
     const dataBuffer = fs.readFileSync(filePath);
-    
-    // Attempt standard PDF parsing
+    const rawContent = dataBuffer.toString('binary');
+    const pageSize = detectPdfPageSize(rawContent);
+
     let pdfData;
     try {
       pdfData = await pdfParse(dataBuffer);
     } catch (e) {
-      // Fallback: regex search on binary file for /Count or /Page
-      const content = dataBuffer.toString('binary');
-      const pageMatches = content.match(/\/Type\s*\/Page\b/g);
+      const pageMatches = rawContent.match(/\/Type\s*\/Page\b/g);
       const pagesCount = pageMatches ? pageMatches.length : 1;
-      return {
-        pages: pagesCount,
-        colorPages: 0, // Fallback default
-        bwPages: pagesCount,
-      };
+      return { pages: pagesCount, colorPages: 0, bwPages: pagesCount, pageSize };
     }
 
     const pages = pdfData.numpages || 1;
 
-    // Detect color pages based on standard PDF ColorSpace searching or rgb commands in PDF stream
-    // Highly resilient heuristic: scan PDF raw contents for color-space operators or patterns
-    const rawContent = dataBuffer.toString('binary');
-    
-    // We count occurrences of RGB color models /DeviceRGB, /CalRGB vs /DeviceGray
-    // Note: We can also search for color operators like 'rg' or 'RG' (which signify RGB color set in text/drawing streams)
-    // For a highly elegant MVP logic, we parse individual page elements, or search the document
+    // MVP Color vs B/W page detection
+    // RGB references or drawing/stroke commands signify color content.
     const rgbOccurrences = (rawContent.match(/\/DeviceRGB/g) || []).length;
     const colorOperators = (rawContent.match(/\d+(\.\d+)?\s+\d+(\.\d+)?\s+\d+(\.\d+)?\s+[rR][gG]/g) || []).length;
     
     let colorPages = 0;
     if (rgbOccurrences > 0 || colorOperators > 5) {
-      // Heuristic: If we see RGB colors, estimate some color pages.
-      // In a real application, you might parse each page's resource dictionary.
-      // Here, we'll do: if color commands are present, we'll estimate a reasonable fraction (e.g., 20% or based on operator count),
-      // but let the user select/override exactly how many color pages they want printed in the UI!
-      // For estimation, let's say: 1 color page for every 10 pages, or at least 1 page if we detect color signs, up to total pages.
-      colorPages = Math.min(pages, Math.max(1, Math.round(rgbOccurrences / 4)));
+      colorPages = Math.min(pages, Math.max(1, Math.round(rgbOccurrences / 3)));
     }
-
     const bwPages = pages - colorPages;
 
     return {
       pages,
       colorPages,
       bwPages,
+      pageSize,
     };
   } catch (error) {
-    console.error('Error parsing PDF page count:', error);
-    return { pages: 1, colorPages: 0, bwPages: 1 };
+    console.error('Error in analyzePdf:', error);
+    return { pages: 1, colorPages: 0, bwPages: 1, pageSize: 'A4' };
   }
 }
 
 /**
- * Main analysis function for uploads
+ * Main analysis function supporting single/multi-file arrays
  */
-export async function analyzeUploadedDocument(filePath: string, originalName: string): Promise<DocumentAnalysisResult> {
-  const ext = path.extname(originalName).toLowerCase();
-  const stats = fs.statSync(filePath);
-  
-  // 1. Basic Malware Scan
-  const malwareScan = basicMalwareScan(filePath, originalName);
-  if (!malwareScan.isSafe) {
-    return {
-      pages: 0,
-      colorPages: 0,
-      bwPages: 0,
-      fileSize: stats.size,
-      fileType: 'malicious',
-      isSafe: false,
-      malwareCheckLog: malwareScan.log,
-    };
-  }
+export async function analyzeUploadedDocuments(
+  uploadedFiles: Express.Multer.File[]
+): Promise<DocumentAnalysisResult> {
+  const filesDetails: FileAnalysisDetail[] = [];
+  let totalPages = 0;
+  let totalColorPages = 0;
+  let totalBwPages = 0;
+  let resolvedPageSize = 'A4';
+  let overallSafe = true;
+  let malwareLog = 'All files passed.';
 
-  // 2. Validate Magic Bytes
-  const magicCheck = checkMagicBytes(filePath, ext);
-  if (!magicCheck.isSafe) {
-    return {
-      pages: 0,
-      colorPages: 0,
-      bwPages: 0,
-      fileSize: stats.size,
-      fileType: 'unknown',
-      isSafe: false,
-      malwareCheckLog: 'Malware Check Failed: Magic bytes do not match expected file type extension.',
-    };
-  }
+  for (const file of uploadedFiles) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    
+    // 1. Run malware scan
+    const malwareScan = basicMalwareScan(file.path, file.originalname);
+    if (!malwareScan.isSafe) {
+      overallSafe = false;
+      malwareLog = malwareScan.log;
+      break;
+    }
 
-  // 3. Extract Pages / Metadata
-  let pages = 1;
-  let colorPages = 0;
-  let bwPages = 1;
+    // 2. Magic byte check
+    const magicCheck = checkMagicBytes(file.path, ext);
+    if (!magicCheck.isSafe) {
+      overallSafe = false;
+      malwareLog = 'File verification failed. Blocked unknown magic headers.';
+      break;
+    }
 
-  if (ext === '.pdf') {
-    const pdfAnalysis = await analyzePdf(filePath);
-    pages = pdfAnalysis.pages;
-    colorPages = pdfAnalysis.colorPages;
-    bwPages = pdfAnalysis.bwPages;
-  } else if (ext === '.docx') {
-    // DOCX: page counts are typically stored in docProps/app.xml. We can approximate or default to 1,
-    // and let the client adjust, which is the safest approach without heavy external dependencies.
-    pages = 1;
-    colorPages = 0;
-    bwPages = 1;
-  } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
-    // Images are always 1 page
-    pages = 1;
-    // Assume images might be color by default unless we do complex pixel calculations. 
-    // Let's estimate color as 1, bw as 0 for image files.
-    colorPages = 1;
-    bwPages = 0;
+    let pages = 1;
+    let colorPages = 0;
+    let bwPages = 1;
+    let pageSize = 'A4';
+
+    if (ext === '.pdf') {
+      const pdfAnalysis = await analyzePdf(file.path);
+      pages = pdfAnalysis.pages;
+      colorPages = pdfAnalysis.colorPages;
+      bwPages = pdfAnalysis.bwPages;
+      pageSize = pdfAnalysis.pageSize;
+      if (pageSize === 'A3') resolvedPageSize = 'A3';
+    } else if (ext === '.docx') {
+      pages = 1;
+      colorPages = 0;
+      bwPages = 1;
+      pageSize = 'A4';
+    } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
+      pages = 1;
+      colorPages = 1; // image is counted as color page by default
+      bwPages = 0;
+      pageSize = 'A4';
+    }
+
+    totalPages += pages;
+    totalColorPages += colorPages;
+    totalBwPages += bwPages;
+
+    filesDetails.push({
+      originalName: file.originalname,
+      filePath: file.filename,
+      size: file.size,
+      mimetype: magicCheck.fileType,
+      pages,
+      colorPages,
+      bwPages,
+      pageSize,
+      isSafe: true,
+    });
   }
 
   return {
-    pages,
-    colorPages,
-    bwPages,
-    fileSize: stats.size,
-    fileType: magicCheck.fileType,
-    isSafe: true,
-    malwareCheckLog: malwareScan.log,
+    totalPages,
+    totalColorPages,
+    totalBwPages,
+    pageSize: resolvedPageSize,
+    isSafe: overallSafe,
+    malwareCheckLog: malwareLog,
+    files: filesDetails,
   };
 }
