@@ -3,7 +3,7 @@ import PublicCafe from './components/PublicCafe';
 import StaffDashboard from './components/StaffDashboard';
 import { ShieldCheck, Printer, User, HelpCircle, ArrowRight } from 'lucide-react';
 
-const API_BASE_URL = '/api'; // Proxied in vite.config.ts
+const apiBase = import.meta.env.VITE_API_BASE_URL; // Proxied in vite.config.ts
 
 export default function App() {
   const [activePortal, setActivePortal] = useState<'customer' | 'staff'>('customer');
