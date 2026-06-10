@@ -1,0 +1,16 @@
+
+> cybercafe-backend@1.0.0 start
+> node dist/index.js
+
+Initializing database tables...
+Database tables created/verified successfully.
+Seeding default Cyber Cafe...
+Seeding default staff users...
+Default staff users seeded. (owner@cyber.com / attendant@cyber.com -> password123)
+Seeding default services...
+Default services seeded successfully.
+Database seeding process completed.
+====================================================
+🚀 Cyber Café System Backend running on port 5000
+🏥 Health Check: http://localhost:5000/health
+====================================================

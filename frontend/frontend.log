@@ -1,0 +1,6 @@
+
+> cybercafe-frontend@0.0.0 preview
+> vite preview --port 3000 --host
+
+  ➜  Local:   http://localhost:3000/
+  ➜  Network: http://169.254.0.21:3000/
