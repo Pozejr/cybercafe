@@ -39,16 +39,38 @@ app.use(cors({
   credentials: true,
 }));
 
+// =============================
+// Core Middleware
+// =============================
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve API Routes
+// =============================
+// API Routes
+// =============================
 app.use('/api', apiRouter);
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'healthy', timestamp: new Date() });
+// =============================
+// System Routes
+// =============================
+app.get('/', (_req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    message: 'Cyber Café Backend is running 🚀',
+    endpoints: {
+      api: '/api',
+      health: '/health'
+    }
+  });
+});
+
+app.get('/health', (_req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Global error handler
