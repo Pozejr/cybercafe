@@ -70,11 +70,11 @@ export default function App() {
         {activePortal === 'customer' ? (
           <PublicCafe 
             onOrderCreated={handleOrderCreatedNotification} 
-            apiBase={API_BASE_URL} 
+            apiBase={apiBase} 
           />
         ) : (
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-            <StaffDashboard apiBase={API_BASE_URL} />
+            <StaffDashboard apiBase={apiBase} />
           </div>
         )}
       </main>
